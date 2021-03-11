@@ -60,7 +60,6 @@ fn consume(py:Python, filename: &str, callback: &PyAny) -> PyResult<()> {
                     format!("error retrieving schema: {}", e)
                 ))? {
                 let new_schema_args = (schema_id, subject_name.as_str(), schema);
-                // let new_schema_args = PyTuple::new(py, vec!(1, "string"));
 
                 callback.call_method1("new_schema", new_schema_args)?;
             }
@@ -79,7 +78,6 @@ fn lt_kafka(_py: Python, m: &PyModule) -> PyResult<()> {
     CombinedLogger::init(
         vec![
             TermLogger::new(LevelFilter::Info, Config::default(), TerminalMode::Mixed),
-            //WriteLogger::new(LevelFilter::Info, Config::default(), File::create("consumer.log")?),
         ]
     ).unwrap();
 
