@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 
 use log::info;
+use reqwest::blocking::Response;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -13,7 +14,7 @@ pub struct SchemaRegistryConfig {
 
 pub struct SchemaRegistry {
     seen_schemas: HashSet<u32>,
-    subject_names: HashMap<u32, String>,
+    subject_names: HashMap<u32, Option<String>>,
     config: SchemaRegistryConfig,
 }
 
@@ -38,54 +39,14 @@ impl SchemaRegistry {
         }
     }
 
-    pub fn get_subject_name(self: &mut Self, schema_id: u32) -> Result<&String, Box<dyn Error>> {
-        if !self.subject_names.contains_key(&schema_id) {
-            let client = reqwest::blocking::Client::new();
+    fn registry_get(self: &Self, path: String) -> Result<Response, Box<dyn Error>> {
+        let client = reqwest::blocking::Client::new();
 
-            let subject_name = {
-                let resp = client.get(format!(
-                    "https://{}/schemas/ids/{}/versions",
-                    self.config.hostname,
-                    schema_id
-                ))
-                    .header(
-                        "Authorization",
-                        format!(
-                            "Basic {}", base64::encode(format!(
-                                "{}:{}",
-                                self.config.username,
-                                self.config.password
-                            ))
-                        ),
-                    )
-                    .send()?;
-
-                let body: Vec<VersionRequestResponse> = resp.json()?;
-
-                body
-                    .iter()
-                    .max_by_key(|i| i.version)
-                    .unwrap()
-                    .subject
-                    .to_owned()
-            };
-
-            info!("query subject name for:{} subject_name:{}", schema_id, subject_name);
-
-            self.subject_names.insert(schema_id, subject_name);
-        }
-
-        Ok(self.subject_names.get(&schema_id).unwrap())
-    }
-
-    pub fn new_schema(self: &mut Self, schema_id: u32) -> Result<Option<String>, Box<dyn Error>> {
-        if !self.seen_schemas.contains(&schema_id) {
-            let client = reqwest::blocking::Client::new();
-
-            let resp = client.get(format!(
-                "https://{}/schemas/ids/{}",
+        Ok(
+            client.get(format!(
+                "https://{}/{}",
                 self.config.hostname,
-                schema_id
+                path
             ))
                 .header(
                     "Authorization",
@@ -97,9 +58,47 @@ impl SchemaRegistry {
                         ))
                     ),
                 )
-                .send()?;
+                .send()?
+        )
+    }
 
-            let body: SchemaRequestResponse = resp.json()?;
+    pub fn get_subject_name(self: &mut Self, schema_id: u32) -> Result<&Option<String>, Box<dyn Error>> {
+
+        if !self.subject_names.contains_key(&schema_id) {
+            let subject_name = {
+                let body: Vec<VersionRequestResponse> = self.registry_get(format!(
+                    "schemas/ids/{}/versions",
+                    schema_id
+                ))?.json()?;
+
+                body
+                    .iter()
+                    .max_by_key(|i| i.version)
+                    .map(|r| r.subject.to_owned())
+            };
+
+            match &subject_name {
+                None => {
+                    info!("missing subject name for:{}", schema_id);
+                }
+                Some(sn) => {
+                    info!("query subject name for:{} subject_name:{}", schema_id, sn);
+                }
+            }
+
+            self.subject_names.insert(schema_id, subject_name);
+        }
+
+        Ok(self.subject_names.get(&schema_id).unwrap())
+    }
+
+    pub fn new_schema(self: &mut Self, schema_id: u32) -> Result<Option<String>, Box<dyn Error>> {
+        if !self.seen_schemas.contains(&schema_id) {
+            let body: SchemaRequestResponse = self.registry_get(format!(
+                "schemas/ids/{}",
+                schema_id
+            ))?.json()?;
+
             self.seen_schemas.insert(schema_id);
 
             Ok(Some(body.schema))

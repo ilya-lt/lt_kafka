@@ -47,25 +47,27 @@ fn consume(py:Python, filename: &str, callback: &PyAny) -> PyResult<()> {
         }?;
 
         let schema_id = u32::from_be_bytes(payload[1..5].try_into()?);
-        let subject_name = registry.get_subject_name(schema_id)
-            .map_err(|e| PyErr::new::<PyException,String>(
-                format!("error retrieving subject name: {}", e)
-            ))?.to_owned();
 
-        let should_process_args = (schema_id, subject_name.as_str());
+        if let Some(subject_name) = registry.get_subject_name(schema_id)
+            .map_err(|e| PyErr::new::<PyException, String>(
+            format!("error retrieving subject name: {}", e)
+            ))?.to_owned() {
 
-        if callback.call_method1("should_process", should_process_args)?.is_true()? {
-            if let Some(schema) = registry.new_schema(schema_id)
-                .map_err(|e| PyErr::new::<PyException,String>(
-                    format!("error retrieving schema: {}", e)
-                ))? {
-                let new_schema_args = (schema_id, subject_name.as_str(), schema);
+            let should_process_args = (schema_id, subject_name.as_str());
 
-                callback.call_method1("new_schema", new_schema_args)?;
+            if callback.call_method1("should_process", should_process_args)?.is_true()? {
+                if let Some(schema) = registry.new_schema(schema_id)
+                    .map_err(|e| PyErr::new::<PyException, String>(
+                        format!("error retrieving schema: {}", e)
+                    ))? {
+                    let new_schema_args = (schema_id, subject_name.as_str(), schema);
+
+                    callback.call_method1("new_schema", new_schema_args)?;
+                }
+
+                let record_args = (schema_id, subject_name.as_str(), PyBytes::new(py, &payload[5..]));
+                callback.call_method1("record", record_args)?;
             }
-
-            let record_args = (schema_id, subject_name.as_str(), PyBytes::new(py, &payload[5..]));
-            callback.call_method1("record", record_args)?;
         }
     }
 
