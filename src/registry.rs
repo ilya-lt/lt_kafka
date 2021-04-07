@@ -4,6 +4,8 @@ use std::error::Error;
 use log::info;
 use reqwest::blocking::Response;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::fs::File;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SchemaRegistryConfig {
@@ -12,9 +14,12 @@ pub struct SchemaRegistryConfig {
     password: String,
 }
 
+type SubjectMap = HashMap<u32, Option<String>>;
+type SubjectVector = Vec<(u32, Option<String>)>;
+
 pub struct SchemaRegistry {
     seen_schemas: HashSet<u32>,
-    subject_names: HashMap<u32, Option<String>>,
+    subject_names: SubjectMap,
     config: SchemaRegistryConfig,
 }
 
@@ -29,13 +34,25 @@ struct VersionRequestResponse {
     version: u32,
 }
 
+const SUBJECTS_CACHE:&str = "subject_names.cache";
 
 impl SchemaRegistry {
     pub fn new(config: SchemaRegistryConfig) -> SchemaRegistry {
+        let mut subject_names:SubjectMap = HashMap::new();
+
+        if Path::new(SUBJECTS_CACHE).exists() {
+            let file = File::open(SUBJECTS_CACHE).unwrap();
+            let subject_vector:SubjectVector = bincode::deserialize_from(file).unwrap();
+
+            for (schema_id, subject_name) in subject_vector {
+                subject_names.insert(schema_id, subject_name);
+            }
+        }
+
         SchemaRegistry {
             config,
             seen_schemas: HashSet::new(),
-            subject_names: HashMap::new(),
+            subject_names
         }
     }
 
@@ -86,7 +103,25 @@ impl SchemaRegistry {
                 }
             }
 
+            {
+                let mut subject_vector:SubjectVector = if Path::new(SUBJECTS_CACHE).exists() {
+                    let file = File::open(SUBJECTS_CACHE)?;
+                    bincode::deserialize_from(file)?
+                } else {
+                    Vec::new()
+                };
+
+                subject_vector.push((schema_id, subject_name.to_owned()));
+
+                let file = File::create(SUBJECTS_CACHE)?;
+                bincode::serialize_into(file, &subject_vector)?;
+            }
+
             self.subject_names.insert(schema_id, subject_name);
+
+
+
+
         }
 
         Ok(self.subject_names.get(&schema_id).unwrap())
