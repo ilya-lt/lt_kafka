@@ -9,9 +9,12 @@ use rdkafka::consumer::Consumer;
 use pyo3::exceptions::PyException;
 use rdkafka::Message;
 use std::convert::TryInto;
+use crate::schema_registry::SchemaRegistry;
+use crate::adapters::{MemoryAdapter, RegistryAdapter, Schema};
 
 mod json_config;
-mod registry;
+mod schema_registry;
+pub mod adapters;
 
 #[pyfunction]
 /// Formats the sum of two numbers as string.
@@ -35,7 +38,8 @@ fn consume(py:Python, filename: &str, callback: &PyAny) -> PyResult<()> {
     consumer.subscribe(topic_vec.as_slice())
         .map_err(|e| PyErr::new::<PyException,String>(format!("error subscribing to topics: {}", e)))?;
 
-    let mut registry = registry::SchemaRegistry::new(config.schema_registry);
+    let registry = SchemaRegistry::new(config.schema_registry);
+    let mut adapter = MemoryAdapter::new(registry);
 
     for result in consumer.iter() {
         let msg = result
@@ -48,7 +52,7 @@ fn consume(py:Python, filename: &str, callback: &PyAny) -> PyResult<()> {
 
         let schema_id = u32::from_be_bytes(payload[1..5].try_into()?);
 
-        if let Some(subject_name) = registry.get_subject_name(schema_id)
+        if let Some(subject_name) = adapter.get_subject_name(schema_id)
             .map_err(|e| PyErr::new::<PyException, String>(
             format!("error retrieving subject name: {}", e)
             ))?.to_owned() {
@@ -56,7 +60,7 @@ fn consume(py:Python, filename: &str, callback: &PyAny) -> PyResult<()> {
             let should_process_args = (schema_id, subject_name.as_str());
 
             if callback.call_method1("should_process", should_process_args)?.is_true()? {
-                if let Some(schema) = registry.new_schema(schema_id)
+                if let Schema::New(schema) = adapter.get_schema(schema_id)
                     .map_err(|e| PyErr::new::<PyException, String>(
                         format!("error retrieving schema: {}", e)
                     ))? {

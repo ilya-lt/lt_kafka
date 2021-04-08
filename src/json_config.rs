@@ -6,8 +6,7 @@ use rdkafka::ClientConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use serde_json::Value;
-
-use crate::registry::SchemaRegistryConfig;
+use crate::schema_registry::SchemaRegistryConfig;
 
 #[derive(Serialize, Deserialize)]
 pub struct ConsumerConfig {
