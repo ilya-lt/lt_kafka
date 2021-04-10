@@ -1,41 +1,25 @@
-use pyo3::prelude::*;
-use pyo3::wrap_pyfunction;
-use pyo3::types::{PyBytes, PyDict, PyTuple};
-use rdkafka::consumer::BaseConsumer;
-use rdkafka::config::RDKafkaLogLevel;
-use simplelog::{CombinedLogger, TermLogger, Config, TerminalMode};
-use log::LevelFilter;
-use rdkafka::consumer::Consumer;
-use pyo3::exceptions::PyException;
-use rdkafka::Message;
 use std::convert::TryInto;
-use crate::schema_registry::SchemaRegistry;
+
+use log::LevelFilter;
+use pyo3::exceptions::PyException;
+use pyo3::prelude::*;
+use pyo3::types::PyBytes;
+use pyo3::wrap_pyfunction;
+use rdkafka::config::RDKafkaLogLevel;
+use rdkafka::consumer::BaseConsumer;
+use rdkafka::consumer::Consumer;
+use rdkafka::Message;
+use simplelog::{CombinedLogger, Config, TerminalMode, TermLogger};
+
 use crate::adapters::{MemoryAdapter, RegistryAdapter, Schema};
-use rdkafka::message::Headers;
+use crate::schema_registry::SchemaRegistry;
+use crate::metadata::Metadata;
 
 mod json_config;
 mod schema_registry;
 pub mod adapters;
+mod metadata;
 
-struct Metadata<'a>{
-    headers: &'a PyDict,
-    timestamp: Option<i64>,
-    topic: &'a str,
-    partition: i32,
-    offset: i64
-}
-
-impl <'a> IntoPy<Py<PyAny>> for Metadata<'a>{
-    fn into_py(self, py: Python<'_>) -> Py<PyAny> {
-        PyTuple::new(py, vec!(
-            self.headers.into_py(py),
-            self.timestamp.into_py(py),
-            self.topic.into_py(py),
-            self.partition.into_py(py),
-            self.offset.into_py(py)
-        )).into_py(py)
-    }
-}
 
 #[pyfunction]
 /// Formats the sum of two numbers as string.
@@ -43,6 +27,7 @@ fn consume(py:Python, filename: &str, callback: &PyAny) -> PyResult<()> {
 
     let config = json_config::read_config(filename)
         .map_err(|e| PyErr::new::<PyException,String>(format!("error reading config file: {}", e)))?;
+
     let consumer: BaseConsumer =
         json_config::client_config(&config)
             .map_err(|e| PyErr::new::<PyException,String>(format!("error configuring consumer: {}", e)))?
@@ -90,28 +75,14 @@ fn consume(py:Python, filename: &str, callback: &PyAny) -> PyResult<()> {
                     callback.call_method1("new_schema", new_schema_args)?;
                 }
 
-                let py_headers = PyDict::new(py);
 
-                if let Some(headers) = msg.headers() {
-                    for i in 0 .. headers.count() {
-                        let (header_name, header_value) = headers.get(i).unwrap();
-
-                        py_headers.set_item(header_name, PyBytes::new(py, header_value))?;
-                    }
-                }
 
 
                 let record_args = (
                     schema_id,
                     subject_name.as_str(),
                     PyBytes::new(py, &payload[5..]),
-                    Metadata{
-                        headers: py_headers,
-                        timestamp: msg.timestamp().to_millis(),
-                        topic: msg.topic(),
-                        partition: msg.partition(),
-                        offset: msg.offset()
-                    }
+                    Metadata::new(&msg)
                 );
 
                 callback.call_method1("record", record_args)?;
@@ -120,6 +91,19 @@ fn consume(py:Python, filename: &str, callback: &PyAny) -> PyResult<()> {
     }
 
     Ok(())
+}
+
+#[pyfunction]
+fn register_schema(filename: &str, subject: &str, schema: &str) -> PyResult<u32> {
+    let config = json_config::read_config(filename)
+        .map_err(|e| PyErr::new::<PyException,String>(format!("error reading config file: {}", e)))?;
+
+    let registry = SchemaRegistry::new(config.schema_registry);
+
+    registry.register_schema(subject, schema.to_string())
+        .map_err(|e| PyErr::new::<PyException, String>(
+            format!("error retrieving schema: {}", e)
+        ))
 }
 
 #[pymodule]
@@ -132,6 +116,7 @@ fn lt_kafka(_py: Python, m: &PyModule) -> PyResult<()> {
     ).unwrap();
 
     m.add_function(wrap_pyfunction!(consume, m)?)?;
+    m.add_function(wrap_pyfunction!(register_schema, m)?)?;
 
     Ok(())
 }
