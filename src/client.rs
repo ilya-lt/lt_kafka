@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::time::Duration;
 
@@ -9,9 +10,10 @@ use pyo3::types::PyBytes;
 use rdkafka::config::RDKafkaLogLevel;
 use rdkafka::consumer::BaseConsumer;
 use rdkafka::consumer::Consumer;
-use rdkafka::error::{KafkaError, RDKafkaErrorCode};
+use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::error::KafkaError::MessageProduction;
 use rdkafka::Message;
+use rdkafka::message::BorrowedMessage;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use rdkafka::util::Timeout;
 use retry::delay::Fixed;
@@ -23,7 +25,6 @@ use crate::json_config;
 use crate::json_config::LtClientConfig;
 use crate::metadata::Metadata;
 use crate::schema_registry::SchemaRegistry;
-use std::collections::HashMap;
 
 #[pyclass]
 pub struct Client {
@@ -40,6 +41,63 @@ fn is_queue_full(result: &KafkaError) -> bool {
         false
     }
 }
+
+
+fn message_iteration<T: RegistryAdapter>(
+    py: Python,
+    result: KafkaResult<BorrowedMessage>,
+    callback: &PyAny,
+    adapter: &mut T,
+    should_process: &mut HashMap<u32, bool>,
+) -> PyResult<()> {
+    let msg = result
+        .map_err(|e| PyErr::new::<PyException, String>(format!("error reading message: {}", e)))?;
+
+    let payload = match msg.payload() {
+        None => Err(PyErr::new::<PyException, &str>("No body given on message")),
+        Some(data) => Ok(data)
+    }?;
+
+    let schema_id = u32::from_be_bytes(payload[1..5].try_into()?);
+
+    if let Some(subject_name) = adapter.get_subject_name(schema_id)
+        .map_err(|e| PyErr::new::<PyException, String>(
+            format!("error retrieving subject name: {}", e)
+        ))?.to_owned() {
+        if !should_process.contains_key(&schema_id) {
+            let should_process_args = (schema_id, subject_name.as_str());
+
+            should_process.insert(
+                schema_id,
+                callback.call_method1("should_process", should_process_args)?.is_true()?,
+            );
+        }
+
+        if *should_process.get(&schema_id).unwrap() {
+            if let Schema::New(schema) = adapter.get_schema(schema_id)
+                .map_err(|e| PyErr::new::<PyException, String>(
+                    format!("error retrieving schema: {}", e)
+                ))? {
+                let new_schema_args = (schema_id, subject_name.as_str(), schema);
+
+                callback.call_method1("new_schema", new_schema_args)?;
+            }
+
+
+            let record_args = (
+                schema_id,
+                subject_name.as_str(),
+                PyBytes::new(py, &payload[5..]),
+                Metadata::new(&msg)
+            );
+
+            callback.call_method1("record", record_args)?;
+        }
+    }
+
+    Ok(())
+}
+
 
 #[pymethods]
 impl Client {
@@ -103,7 +161,7 @@ impl Client {
         ))
     }
 
-    fn consume(&self, py: Python, callback: &PyAny) -> PyResult<()> {
+    unsafe fn consume(&self, py: Python, callback: &PyAny) -> PyResult<()> {
         let consumer: BaseConsumer =
             json_config::consumer_config(&self.config)
                 .map_err(|e| PyErr::new::<PyException, String>(format!("error configuring consumer: {}", e)))?
@@ -121,54 +179,19 @@ impl Client {
             .map_err(|e| PyErr::new::<PyException, String>(format!("error subscribing to topics: {}", e)))?;
 
         let mut adapter = MemoryAdapter::new(&self.registry);
-        let mut should_process:HashMap<u32, bool> = HashMap::new();
+        let mut should_process: HashMap<u32, bool> = HashMap::new();
 
         for result in consumer.iter() {
-            let msg = result
-                .map_err(|e| PyErr::new::<PyException, String>(format!("error reading message: {}", e)))?;
+            let pool = py.new_pool();
+            let new_py = pool.python();
 
-            let payload = match msg.payload() {
-                None => Err(PyErr::new::<PyException, &str>("No body given on message")),
-                Some(data) => Ok(data)
-            }?;
-
-            let schema_id = u32::from_be_bytes(payload[1..5].try_into()?);
-
-            if let Some(subject_name) = adapter.get_subject_name(schema_id)
-                .map_err(|e| PyErr::new::<PyException, String>(
-                    format!("error retrieving subject name: {}", e)
-                ))?.to_owned() {
-
-                if !should_process.contains_key(&schema_id){
-                    let should_process_args = (schema_id, subject_name.as_str());
-
-                    should_process.insert(
-                        schema_id,
-                        callback.call_method1("should_process", should_process_args)?.is_true()?
-                    );
-                }
-
-                if *should_process.get(&schema_id).unwrap() {
-                    if let Schema::New(schema) = adapter.get_schema(schema_id)
-                        .map_err(|e| PyErr::new::<PyException, String>(
-                            format!("error retrieving schema: {}", e)
-                        ))? {
-                        let new_schema_args = (schema_id, subject_name.as_str(), schema);
-
-                        callback.call_method1("new_schema", new_schema_args)?;
-                    }
-
-
-                    let record_args = (
-                        schema_id,
-                        subject_name.as_str(),
-                        PyBytes::new(py, &payload[5..]),
-                        Metadata::new(&msg)
-                    );
-
-                    callback.call_method1("record", record_args)?;
-                }
-            }
+            message_iteration(
+                new_py,
+                result,
+                callback,
+                &mut adapter,
+                &mut should_process,
+            )?
         }
 
         Ok(())

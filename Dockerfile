@@ -1,5 +1,5 @@
 # Install rust toolchain, don't export it, just the binary
-FROM python:3.9.2
+FROM python:3.8
 WORKDIR /root
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup.sh && \
@@ -28,5 +28,5 @@ COPY src src
 
 RUN cargo b --release
 
-FROM python:3.9.2
+FROM python:3.8
 COPY --from=0 /project/lt-kafka/target/release/liblt_kafka.so /lib/liblt_kafka.so
