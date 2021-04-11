@@ -23,6 +23,7 @@ use crate::json_config;
 use crate::json_config::LtClientConfig;
 use crate::metadata::Metadata;
 use crate::schema_registry::SchemaRegistry;
+use std::collections::HashMap;
 
 #[pyclass]
 pub struct Client {
@@ -77,7 +78,7 @@ impl Client {
         full_message.extend_from_slice(&schema_id.to_be_bytes());
         full_message.extend_from_slice(value);
 
-        retry(Fixed::from_millis(1000), || {
+        retry(Fixed::from_millis(100), || {
             let resp = self.producer.send(
                 BaseRecord::to(topic)
                     .payload(full_message.as_slice())
@@ -87,7 +88,9 @@ impl Client {
             if let Err((e, _)) = resp {
                 if is_queue_full(&e) {
                     info!("Queue is full, polling");
-                    self.producer.poll(Timeout::After(Duration::from_secs(10)));
+                    let messages = self.producer.poll(Timeout::After(Duration::from_secs(1)));
+
+                    info!("Sent {} messages", messages);
                     OperationResult::Retry(e)
                 } else {
                     OperationResult::Err(e)
@@ -118,6 +121,7 @@ impl Client {
             .map_err(|e| PyErr::new::<PyException, String>(format!("error subscribing to topics: {}", e)))?;
 
         let mut adapter = MemoryAdapter::new(&self.registry);
+        let mut should_process:HashMap<u32, bool> = HashMap::new();
 
         for result in consumer.iter() {
             let msg = result
@@ -134,9 +138,17 @@ impl Client {
                 .map_err(|e| PyErr::new::<PyException, String>(
                     format!("error retrieving subject name: {}", e)
                 ))?.to_owned() {
-                let should_process_args = (schema_id, subject_name.as_str());
 
-                if callback.call_method1("should_process", should_process_args)?.is_true()? {
+                if !should_process.contains_key(&schema_id){
+                    let should_process_args = (schema_id, subject_name.as_str());
+
+                    should_process.insert(
+                        schema_id,
+                        callback.call_method1("should_process", should_process_args)?.is_true()?
+                    );
+                }
+
+                if *should_process.get(&schema_id).unwrap() {
                     if let Schema::New(schema) = adapter.get_schema(schema_id)
                         .map_err(|e| PyErr::new::<PyException, String>(
                             format!("error retrieving schema: {}", e)
