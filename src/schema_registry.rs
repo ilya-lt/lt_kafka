@@ -1,9 +1,9 @@
 use std::error::Error;
-
-use reqwest::blocking::Response;
-use serde::{Serialize, Deserialize};
-use log::info;
 use std::io::{Error as IOError, ErrorKind};
+
+use log::info;
+use reqwest::blocking::Response;
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SchemaRegistryConfig {
@@ -97,7 +97,7 @@ impl SchemaRegistry {
 
     pub fn register_schema(&self, subject: &str, schema: String) -> Result<u32, Box<dyn Error>> {
         let client = reqwest::blocking::Client::new();
-        let request = SchemaRegisterRequest{ schema };
+        let request = SchemaRegisterRequest { schema };
         let response = client.post(format!(
             "https://{}/{}",
             self.config.hostname,
@@ -124,11 +124,9 @@ impl SchemaRegistry {
                 response.text()?
             ))))
         }
-
-
     }
 
     pub fn new(config: SchemaRegistryConfig) -> Self {
-        SchemaRegistry{ config }
+        SchemaRegistry { config }
     }
 }

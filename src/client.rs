@@ -1,24 +1,28 @@
-use crate::json_config::ConsumerConfig;
-use crate::schema_registry::SchemaRegistry;
-use pyo3::{PyResult, PyErr};
-use crate::json_config;
+use std::convert::TryInto;
+
+use log::info;
+use pyo3::{PyErr, PyResult};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use rdkafka::config::RDKafkaLogLevel;
 use rdkafka::consumer::BaseConsumer;
 use rdkafka::consumer::Consumer;
 use rdkafka::Message;
+use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+use rdkafka::util::Timeout;
+
 use crate::adapters::{MemoryAdapter, RegistryAdapter, Schema};
-use std::convert::TryInto;
-use pyo3::types::PyBytes;
+use crate::json_config;
+use crate::json_config::ConsumerConfig;
 use crate::metadata::Metadata;
-use rdkafka::producer::{BaseProducer, BaseRecord};
+use crate::schema_registry::SchemaRegistry;
 
 #[pyclass]
 pub struct Client {
     config: ConsumerConfig,
     registry: SchemaRegistry,
-    producer: BaseProducer
+    producer: BaseProducer,
 }
 
 #[pymethods]
@@ -26,21 +30,21 @@ impl Client {
     #[new]
     fn new(filename: &str) -> PyResult<Self> {
         let config = json_config::read_config(filename)
-            .map_err(|e| PyErr::new::<PyException,String>(format!("error reading config file: {}", e)))?;
+            .map_err(|e| PyErr::new::<PyException, String>(format!("error reading config file: {}", e)))?;
 
         let registry = SchemaRegistry::new(config.schema_registry.to_owned());
 
         let producer: BaseProducer =
             json_config::client_config(&config)
-                .map_err(|e| PyErr::new::<PyException,String>(format!("error configuring consumer: {}", e)))?
+                .map_err(|e| PyErr::new::<PyException, String>(format!("error configuring consumer: {}", e)))?
                 .set_log_level(RDKafkaLogLevel::Debug)
                 .create()
-                .map_err(|e| PyErr::new::<PyException,String>(format!("error creating consumer: {}", e)))?;
+                .map_err(|e| PyErr::new::<PyException, String>(format!("error creating consumer: {}", e)))?;
 
         Ok(Client {
             config,
             registry,
-            producer
+            producer,
         })
     }
 
@@ -52,7 +56,7 @@ impl Client {
     }
 
     fn produce(&self, topic: &str, schema_id: u32, key: &[u8], value: &[u8]) -> PyResult<()> {
-        let mut full_message:Vec<u8> = Vec::with_capacity(value.len() + 5);
+        let mut full_message: Vec<u8> = Vec::with_capacity(value.len() + 5);
 
         full_message.push(0);
         full_message.extend_from_slice(&schema_id.to_be_bytes());
@@ -67,14 +71,13 @@ impl Client {
         ))
     }
 
-    fn consume(&self, py:Python, callback: &PyAny) -> PyResult<()> {
-
+    fn consume(&self, py: Python, callback: &PyAny) -> PyResult<()> {
         let consumer: BaseConsumer =
             json_config::client_config(&self.config)
-                .map_err(|e| PyErr::new::<PyException,String>(format!("error configuring consumer: {}", e)))?
+                .map_err(|e| PyErr::new::<PyException, String>(format!("error configuring consumer: {}", e)))?
                 .set_log_level(RDKafkaLogLevel::Debug)
                 .create()
-                .map_err(|e| PyErr::new::<PyException,String>(format!("error creating consumer: {}", e)))?;
+                .map_err(|e| PyErr::new::<PyException, String>(format!("error creating consumer: {}", e)))?;
 
         let topic_vec: Vec<&str> = self.config
             .topics
@@ -83,16 +86,16 @@ impl Client {
             .collect();
 
         consumer.subscribe(topic_vec.as_slice())
-            .map_err(|e| PyErr::new::<PyException,String>(format!("error subscribing to topics: {}", e)))?;
+            .map_err(|e| PyErr::new::<PyException, String>(format!("error subscribing to topics: {}", e)))?;
 
         let mut adapter = MemoryAdapter::new(&self.registry);
 
         for result in consumer.iter() {
             let msg = result
-                .map_err(|e| PyErr::new::<PyException,String>(format!("error reading message: {}", e)))?;
+                .map_err(|e| PyErr::new::<PyException, String>(format!("error reading message: {}", e)))?;
 
             let payload = match msg.payload() {
-                None => Err(PyErr::new::<PyException,&str>("No body given on message")),
+                None => Err(PyErr::new::<PyException, &str>("No body given on message")),
                 Some(data) => Ok(data)
             }?;
 
@@ -102,7 +105,6 @@ impl Client {
                 .map_err(|e| PyErr::new::<PyException, String>(
                     format!("error retrieving subject name: {}", e)
                 ))?.to_owned() {
-
                 let should_process_args = (schema_id, subject_name.as_str());
 
                 if callback.call_method1("should_process", should_process_args)?.is_true()? {
@@ -116,8 +118,6 @@ impl Client {
                     }
 
 
-
-
                     let record_args = (
                         schema_id,
                         subject_name.as_str(),
@@ -129,6 +129,14 @@ impl Client {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    fn flush(&self) -> PyResult<()> {
+        info!("flushing {} in-flight messages", self.producer.in_flight_count());
+
+        self.producer.flush(Timeout::Never);
 
         Ok(())
     }
