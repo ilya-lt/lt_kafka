@@ -1,4 +1,5 @@
 use std::convert::TryInto;
+use std::time::Duration;
 
 use log::info;
 use pyo3::{PyErr, PyResult};
@@ -8,21 +9,35 @@ use pyo3::types::PyBytes;
 use rdkafka::config::RDKafkaLogLevel;
 use rdkafka::consumer::BaseConsumer;
 use rdkafka::consumer::Consumer;
+use rdkafka::error::{KafkaError, RDKafkaErrorCode};
+use rdkafka::error::KafkaError::MessageProduction;
 use rdkafka::Message;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use rdkafka::util::Timeout;
+use retry::delay::Fixed;
+use retry::OperationResult;
+use retry::retry;
 
 use crate::adapters::{MemoryAdapter, RegistryAdapter, Schema};
 use crate::json_config;
-use crate::json_config::ConsumerConfig;
+use crate::json_config::LtClientConfig;
 use crate::metadata::Metadata;
 use crate::schema_registry::SchemaRegistry;
 
 #[pyclass]
 pub struct Client {
-    config: ConsumerConfig,
+    config: LtClientConfig,
     registry: SchemaRegistry,
     producer: BaseProducer,
+}
+
+
+fn is_queue_full(result: &KafkaError) -> bool {
+    if let MessageProduction(code) = result {
+        return *code == RDKafkaErrorCode::QueueFull;
+    } else {
+        false
+    }
 }
 
 #[pymethods]
@@ -35,7 +50,7 @@ impl Client {
         let registry = SchemaRegistry::new(config.schema_registry.to_owned());
 
         let producer: BaseProducer =
-            json_config::client_config(&config)
+            json_config::producer_config(&config)
                 .map_err(|e| PyErr::new::<PyException, String>(format!("error configuring consumer: {}", e)))?
                 .set_log_level(RDKafkaLogLevel::Debug)
                 .create()
@@ -62,18 +77,32 @@ impl Client {
         full_message.extend_from_slice(&schema_id.to_be_bytes());
         full_message.extend_from_slice(value);
 
-        self.producer.send(
-            BaseRecord::to(topic)
-                .payload(full_message.as_slice())
-                .key(key)
-        ).map_err(|e| PyErr::new::<PyException, String>(
-            format!("failed to produce message: {}", e.0)
+        retry(Fixed::from_millis(1000), || {
+            let resp = self.producer.send(
+                BaseRecord::to(topic)
+                    .payload(full_message.as_slice())
+                    .key(key)
+            );
+
+            if let Err((e, _)) = resp {
+                if is_queue_full(&e) {
+                    info!("Queue is full, polling");
+                    self.producer.poll(Timeout::After(Duration::from_secs(10)));
+                    OperationResult::Retry(e)
+                } else {
+                    OperationResult::Err(e)
+                }
+            } else {
+                OperationResult::Ok(())
+            }
+        }).map_err(|e| PyErr::new::<PyException, String>(
+            format!("failed to produce message: {}", e)
         ))
     }
 
     fn consume(&self, py: Python, callback: &PyAny) -> PyResult<()> {
         let consumer: BaseConsumer =
-            json_config::client_config(&self.config)
+            json_config::consumer_config(&self.config)
                 .map_err(|e| PyErr::new::<PyException, String>(format!("error configuring consumer: {}", e)))?
                 .set_log_level(RDKafkaLogLevel::Debug)
                 .create()
