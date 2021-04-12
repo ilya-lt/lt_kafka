@@ -7,12 +7,12 @@ use pyo3::{PyErr, PyResult};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use rdkafka::{Message, Offset, TopicPartitionList};
 use rdkafka::config::RDKafkaLogLevel;
 use rdkafka::consumer::BaseConsumer;
 use rdkafka::consumer::Consumer;
 use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::error::KafkaError::MessageProduction;
-use rdkafka::Message;
 use rdkafka::message::BorrowedMessage;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use rdkafka::util::Timeout;
@@ -161,22 +161,44 @@ impl Client {
         ))
     }
 
-    unsafe fn consume(&self, py: Python, callback: &PyAny) -> PyResult<()> {
+    unsafe fn consume(&self, py: Python, callback: &PyAny, topics: Vec<&str>, group_id: Option<&str>) -> PyResult<()> {
         let consumer: BaseConsumer =
-            json_config::consumer_config(&self.config)
+            json_config::consumer_config(&self.config, group_id)
                 .map_err(|e| PyErr::new::<PyException, String>(format!("error configuring consumer: {}", e)))?
                 .set_log_level(RDKafkaLogLevel::Debug)
                 .create()
                 .map_err(|e| PyErr::new::<PyException, String>(format!("error creating consumer: {}", e)))?;
 
-        let topic_vec: Vec<&str> = self.config
-            .topics
-            .iter()
-            .map(|x| x.as_str())
-            .collect();
+        if group_id == None {
+            let mut list = TopicPartitionList::new();
 
-        consumer.subscribe(topic_vec.as_slice())
-            .map_err(|e| PyErr::new::<PyException, String>(format!("error subscribing to topics: {}", e)))?;
+            for topic in topics {
+                let result = consumer.fetch_metadata(
+                    Some(topic),
+                    Timeout::After(Duration::from_secs(60)),
+                )
+                    .map_err(|e| PyErr::new::<PyException, String>(
+                        format!("failed to read metadata: {}", e)
+                    ))?;
+
+                for mt in result.topics() {
+                    for partition in mt.partitions() {
+                        list.add_partition_offset(topic, partition.id(), Offset::End)
+                            .map_err(|e| PyErr::new::<PyException, String>(
+                                format!("failed to add partition: {}", e)
+                            ))?;
+                    }
+                }
+            }
+
+            consumer.assign(&list)
+                .map_err(|e| PyErr::new::<PyException, String>(
+                    format!("failed to assign topic & partitions: {}", e)
+                ))?;
+        } else {
+            consumer.subscribe(topics.as_slice())
+                .map_err(|e| PyErr::new::<PyException, String>(format!("error subscribing to topics: {}", e)))?;
+        }
 
         let mut adapter = MemoryAdapter::new(&self.registry);
         let mut should_process: HashMap<u32, bool> = HashMap::new();

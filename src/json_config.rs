@@ -19,7 +19,6 @@ struct KafkaConfigSections {
 #[derive(Serialize, Deserialize)]
 pub struct LtClientConfig {
     kafka_config: KafkaConfigSections,
-    pub topics: Vec<String>,
     pub schema_registry: SchemaRegistryConfig,
 }
 
@@ -48,11 +47,17 @@ fn write_config(config: &mut ClientConfig, section: &Map<String, Value>) -> Resu
     Ok(())
 }
 
-pub fn consumer_config(client_config: &LtClientConfig) -> Result<ClientConfig, Box<dyn Error>> {
+pub fn consumer_config(client_config: &LtClientConfig, group_id: Option<&str>) -> Result<ClientConfig, Box<dyn Error>> {
     let mut config = ClientConfig::new();
 
     write_config(&mut config, &client_config.kafka_config.base)?;
     write_config(&mut config, &client_config.kafka_config.consumer)?;
+
+    if let Some(group) = group_id {
+        config.set("group.id", group);
+    } else {
+        config.set("group.id", "rdkafka");
+    }
 
     Ok(config)
 }
