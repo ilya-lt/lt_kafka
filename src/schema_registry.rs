@@ -2,8 +2,11 @@ use std::error::Error;
 use std::io::{Error as IOError, ErrorKind};
 
 use log::info;
+use rdkafka::message::ToBytes;
 use reqwest::blocking::Response;
+use rocksdb::{DB, DBWithThreadMode, SingleThreaded};
 use serde::{Deserialize, Serialize};
+use std::str;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SchemaRegistryConfig {
@@ -13,7 +16,8 @@ pub struct SchemaRegistryConfig {
 }
 
 pub struct SchemaRegistry {
-    config: SchemaRegistryConfig
+    config: SchemaRegistryConfig,
+    db: DBWithThreadMode<SingleThreaded>
 }
 
 #[derive(Serialize, Deserialize)]
@@ -62,28 +66,38 @@ impl SchemaRegistry {
     }
 
     pub fn get_subject_name(&self, schema_id: u32) -> Result<Option<String>, Box<dyn Error>> {
-        let subject_name = {
-            let body: Vec<VersionRequestResponse> = self.registry_get(format!(
-                "schemas/ids/{}/versions",
-                schema_id
-            ))?.json()?;
+        let cache_key = format!("subject_name_{}", schema_id);
+        let result = self.db.get(cache_key.as_bytes())?;
 
-            body
-                .iter()
-                .max_by_key(|i| i.version)
-                .map(|r| r.subject.to_owned())
-        };
+        if let Some(result_bytes) = result {
+            let result_string = str::from_utf8(result_bytes.as_slice())?.to_owned();
+            info!("cache_hit subject name for:{} subject_name:{}", schema_id, result_string);
+            Ok(Some(result_string))
+        } else {
+            let subject_name = {
+                let body: Vec<VersionRequestResponse> = self.registry_get(format!(
+                    "schemas/ids/{}/versions",
+                    schema_id
+                ))?.json()?;
 
-        match &subject_name {
-            None => {
-                info!("missing subject name for:{}", schema_id);
+                body
+                    .iter()
+                    .max_by_key(|i| i.version)
+                    .map(|r| r.subject.to_owned())
+            };
+
+            match &subject_name {
+                None => {
+                    info!("missing subject name for:{}", schema_id);
+                }
+                Some(sn) => {
+                    info!("query subject name for:{} subject_name:{}", schema_id, sn);
+                    self.db.put(cache_key.as_bytes(), sn.to_bytes())?;
+                }
             }
-            Some(sn) => {
-                info!("query subject name for:{} subject_name:{}", schema_id, sn);
-            }
+
+            Ok(subject_name)
         }
-
-        Ok(subject_name)
     }
 
     pub fn get_schema(&self, schema_id: u32) -> Result<String, Box<dyn Error>> {
@@ -127,6 +141,8 @@ impl SchemaRegistry {
     }
 
     pub fn new(config: SchemaRegistryConfig) -> Self {
-        SchemaRegistry { config }
+        let db = DB::open_default("db").unwrap();
+
+        SchemaRegistry { config, db }
     }
 }
